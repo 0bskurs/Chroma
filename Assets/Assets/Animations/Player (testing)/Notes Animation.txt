@@ -1,0 +1,2 @@
+Transition between Idle and Horizontal Movement blend trees, because you cant put Idle in the Horizontal Movement Blend Tree.
+Else it's gonna affect walking animation.
