@@ -1,33 +1,63 @@
 using UnityEngine;
+using UnityEngine.AI;
 
 public class ArcToTargetDistance : MonoBehaviour
 {
+    #region Variables
+
+    [Header("Patrol")]
+    public Transform patrolPointA;
+    public Transform patrolPointB;
+    public float patrolWaitTime = 1f;
+
     [Header("Detection")]
-    public float rayDistance = 50f;
+    public float detectionDistance = 15f;
+    public float loseTargetDelay = 3f;
     public string targetTag = "Player";
 
-    [Header("Rotation")]
-    public float rotationSpeed = 5f;
+    [Header("Chase")]
+    public float attackDistance = 4f;
 
     [Header("Jump")]
     public float arcHeight = 5f;
-    public float delayBeforeJump = 2f;
+    public float jumpCooldown = 2f;
+    public float jumpDelay = 1.5f;
 
-    [Header("Ground Check")]
-    public float groundCheckDistance = 1.2f;
-    public LayerMask groundLayer;
+    [Header("Avoidance")]
+    public float obstacleCheckDistance = 2f;
+    public float avoidanceStrength = 2f;
 
+    public float rotationSpeed = 6f;
+
+    private NavMeshAgent agent;
     private Rigidbody rb;
-    private Transform currentTarget;
 
-    private float trackStartTime;
-    private bool isTracking = false;
+    private Transform player;
+    private Transform currentPatrolTarget;
+
+    private float waitTimer;
+    private float lastSeenTime;
+    private float lastJumpTime;
+    private float jumpStartTime;
+    private float jumpEndTime;
+
+    private bool hasSeenPlayer = false;
     private bool isJumping = false;
-    float jumpEndTime;
+    private bool isPreparingJump = false;
+
+    #endregion
+
+    #region Unity Methods
 
     void Start()
     {
+        agent = GetComponent<NavMeshAgent>();
         rb = GetComponent<Rigidbody>();
+
+        agent.updateRotation = false;
+
+        currentPatrolTarget = patrolPointA;
+        agent.SetDestination(currentPatrolTarget.position);
     }
 
     void Update()
@@ -38,70 +68,191 @@ public class ArcToTargetDistance : MonoBehaviour
             return;
         }
 
-        if (!isTracking)
+        DetectPlayer();
+
+        Vector3 moveTarget;
+
+        if (player != null)
         {
-            DetectTarget();
-        }
-        else
-        {
-            if (currentTarget == null)
+            hasSeenPlayer = true;
+            lastSeenTime = Time.time;
+
+            float distance = Vector3.Distance(transform.position, player.position);
+
+            if (distance <= attackDistance && Time.time >= lastJumpTime + jumpCooldown)
             {
-                ResetState();
+                if (!isPreparingJump)
+                {
+                    isPreparingJump = true;
+                    jumpStartTime = Time.time;
+
+                    agent.isStopped = true;
+                    agent.velocity = Vector3.zero;
+                }
+
+                RotateTowards(player.position);
+
+                if (Time.time >= jumpStartTime + jumpDelay)
+                {
+                    isPreparingJump = false;
+                    StartJump(player.position);
+                }
+
                 return;
             }
 
-            RotateTowardsTarget();
-
-            if (Time.time >= trackStartTime + delayBeforeJump)
-            {
-                LaunchToTarget(currentTarget.position);
-                isJumping = true;
-            }
+            isPreparingJump = false;
+            moveTarget = player.position;
         }
-    }
-
-    void DetectTarget()
-    {
-        Ray ray = new Ray(transform.position, transform.forward);
-        RaycastHit hit;
-
-        Debug.DrawRay(transform.position, transform.forward * rayDistance, Color.red);
-
-        if (Physics.Raycast(ray, out hit, rayDistance, ~0, QueryTriggerInteraction.Collide))
+        else
         {
-            if (hit.collider.CompareTag(targetTag))
+            if (hasSeenPlayer && Time.time < lastSeenTime + loseTargetDelay)
             {
-                currentTarget = hit.transform;
-                isTracking = true;
-                trackStartTime = Time.time;
+                moveTarget = currentPatrolTarget.position;
+            }
+            else
+            {
+                hasSeenPlayer = false;
+
+                if (currentPatrolTarget == null) return;
+
+                float distance = Vector3.Distance(transform.position, currentPatrolTarget.position);
+
+                if (distance < 1f)
+                {
+                    if (Time.time < waitTimer + patrolWaitTime)
+                        return;
+
+                    waitTimer = Time.time;
+                    currentPatrolTarget = currentPatrolTarget == patrolPointA ? patrolPointB : patrolPointA;
+                }
+
+                moveTarget = currentPatrolTarget.position;
+            }
+        }
+
+        agent.isStopped = false;
+        agent.SetDestination(moveTarget);
+
+        HandleRotationWithAvoidance();
+    }
+
+    #endregion
+
+    #region Detection
+
+    void DetectPlayer()
+    {
+        Collider[] hits = Physics.OverlapSphere(transform.position, detectionDistance);
+
+        player = null;
+
+        foreach (var hit in hits)
+        {
+            if (hit.CompareTag(targetTag))
+            {
+                player = hit.transform;
+                break;
             }
         }
     }
 
-    void RotateTowardsTarget()
+    #endregion
+
+    #region Movement & Rotation
+
+    void RotateTowards(Vector3 targetPos)
     {
-        Vector3 direction = currentTarget.position - transform.position;
-        direction.y = 0f;
+        Vector3 dir = targetPos - transform.position;
+        dir.y = 0f;
 
-        if (direction.sqrMagnitude < 0.001f) return;
+        if (dir.sqrMagnitude < 0.001f) return;
 
-        Quaternion targetRotation = Quaternion.LookRotation(direction);
+        Quaternion rot = Quaternion.LookRotation(dir);
+
         transform.rotation = Quaternion.Slerp(
             transform.rotation,
-            targetRotation,
+            rot,
             rotationSpeed * Time.deltaTime
         );
     }
 
-    void LaunchToTarget(Vector3 targetPosition)
+    void HandleRotationWithAvoidance()
+    {
+        if (agent.velocity.sqrMagnitude < 0.1f)
+            return;
+
+        Vector3 desiredDir = agent.desiredVelocity.normalized;
+        desiredDir.y = 0f;
+
+        Vector3 avoidance = Vector3.zero;
+
+        Vector3[] dirs =
+        {
+        transform.forward,
+        Quaternion.Euler(0, 30, 0) * transform.forward,
+        Quaternion.Euler(0, -30, 0) * transform.forward
+    };
+
+        foreach (var dir in dirs)
+        {
+            RaycastHit hit;
+
+            if (Physics.Raycast(transform.position, dir, out hit, obstacleCheckDistance))
+            {
+                if (hit.collider.CompareTag("Wall"))
+                {
+                    Vector3 normal = hit.normal;
+                    normal.y = 0f;
+
+                    float strength = (obstacleCheckDistance - hit.distance) / obstacleCheckDistance;
+                    avoidance += normal * strength * avoidanceStrength;
+                }
+            }
+
+            Debug.DrawRay(transform.position, dir * obstacleCheckDistance, Color.yellow);
+        }
+
+        Vector3 finalDir = (desiredDir + avoidance).normalized;
+
+        if (finalDir.sqrMagnitude < 0.001f)
+            return;
+
+        Quaternion targetRot = Quaternion.LookRotation(finalDir);
+
+        transform.rotation = Quaternion.Slerp(
+            transform.rotation,
+            targetRot,
+            rotationSpeed * Time.deltaTime
+        );
+    }
+
+    #endregion
+
+    #region Jump
+
+    void StartJump(Vector3 targetPos)
+    {
+        isJumping = true;
+        lastJumpTime = Time.time;
+
+        agent.isStopped = true;
+        agent.velocity = Vector3.zero;
+        agent.updatePosition = false;
+        agent.updateRotation = false;
+
+        JumpToTarget(targetPos);
+    }
+
+    void JumpToTarget(Vector3 targetPos)
     {
         float gravity = Physics.gravity.y;
 
-        Vector3 displacement = targetPosition - transform.position;
+        Vector3 displacement = targetPos - transform.position;
         Vector3 displacementXZ = new Vector3(displacement.x, 0f, displacement.z);
 
         float timeUp = Mathf.Sqrt(-2f * arcHeight / gravity);
-        float timeDown = Mathf.Sqrt(2f * (displacement.y - arcHeight) / gravity);
+        float timeDown = Mathf.Sqrt(2f * Mathf.Abs(displacement.y - arcHeight) / -gravity);
         float totalTime = timeUp + timeDown;
 
         Vector3 velocityY = Vector3.up * Mathf.Sqrt(-2f * gravity * arcHeight);
@@ -109,28 +260,30 @@ public class ArcToTargetDistance : MonoBehaviour
 
         rb.linearVelocity = velocityXZ + velocityY;
 
-        // 🔑 store when jump should end
-        jumpEndTime = Time.time + totalTime + 0.1f;
+        jumpEndTime = Time.time + totalTime;
     }
 
     void CheckLanding()
     {
-       
         if (Time.time < jumpEndTime)
             return;
 
-        if (Physics.Raycast(transform.position, Vector3.down, groundCheckDistance, groundLayer))
-        {
-            ResetState();
-        }
+        isJumping = false;
+
+        rb.linearVelocity = Vector3.zero;
+
+        agent.Warp(transform.position);
+        agent.updatePosition = true;
+        agent.updateRotation = false;
+        agent.isStopped = false;
+
+        if (player != null)
+            agent.SetDestination(player.position);
+        else
+            agent.SetDestination(currentPatrolTarget.position);
     }
 
-    void ResetState()
-    {
-        isTracking = false;
-        isJumping = false;
-        currentTarget = null;
-        rb.linearVelocity = Vector3.zero;
-    }
+    #endregion
 }
-    
+
+
