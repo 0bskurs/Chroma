@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.AI;
+using System.Collections;
 
 public class ArcToTargetDistance : MonoBehaviour
 {
@@ -44,6 +45,8 @@ public class ArcToTargetDistance : MonoBehaviour
     private bool hasSeenPlayer = false;
     private bool isJumping = false;
     private bool isPreparingJump = false;
+    public float moveSpeed = 5f;
+    bool traversingLink = false;
 
     #endregion
 
@@ -51,17 +54,24 @@ public class ArcToTargetDistance : MonoBehaviour
 
     void Start()
     {
+        
         agent = GetComponent<NavMeshAgent>();
         rb = GetComponent<Rigidbody>();
 
         agent.updateRotation = false;
-
+        agent.autoTraverseOffMeshLink = false;
         currentPatrolTarget = patrolPointA;
         agent.SetDestination(currentPatrolTarget.position);
     }
 
     void Update()
     {
+        if (agent.isOnOffMeshLink && !traversingLink)
+        {
+            StartCoroutine(TraverseOffMeshLink());
+            return;
+        }
+
         if (isJumping)
         {
             CheckLanding();
@@ -160,6 +170,41 @@ public class ArcToTargetDistance : MonoBehaviour
     #endregion
 
     #region Movement & Rotation
+
+    IEnumerator TraverseOffMeshLink()
+    {
+        traversingLink = true;
+
+        OffMeshLinkData data = agent.currentOffMeshLinkData;
+
+        Vector3 endPos = data.endPos + Vector3.up * agent.baseOffset;
+
+        agent.isStopped = true;
+
+        while (Vector3.Distance(transform.position, endPos) > 0.1f)
+        {
+            Vector3 dir = (endPos - transform.position).normalized;
+
+            rb.linearVelocity = dir * moveSpeed;
+
+            Quaternion rot = Quaternion.LookRotation(dir);
+
+            transform.rotation = Quaternion.Slerp(
+                transform.rotation,
+                rot,
+                rotationSpeed * Time.deltaTime
+            );
+
+            yield return null;
+        }
+
+        rb.linearVelocity = Vector3.zero;
+
+        agent.CompleteOffMeshLink();
+        agent.isStopped = false;
+
+        traversingLink = false;
+    }
 
     void RotateTowards(Vector3 targetPos)
     {
